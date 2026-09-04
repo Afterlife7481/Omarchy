@@ -5,13 +5,16 @@
 #
 # WHAT IT DOES
 #   1. Creates the working directories I always want under $HOME.
-#   2. Generates a dedicated GitHub SSH key (+ ~/.ssh/config Host block).
-#   3. Removes the preinstalled Omarchy web apps I never use.
-#   4. Removes native packages I don't want (OBS Studio, Kdenlive, Moonlight).
-#   5. Installs the native apps I always want (repo + AUR), incl. plain vim.
-#   6. Force-installs a few Chromium extensions via enterprise policy.
-#   7. Replaces the screensaver's "OMARCHY" logo with my own ASCII banner.
-#   8. Applies my Hyprland input tweaks (inverse / natural trackpad scrolling).
+#   2. Clones this setup's own git repo and symlinks its scripts into
+#      ~/.local/bin, so a downloaded bootstrap copy hands off to a git-tracked
+#      working tree on the very first run.
+#   3. Generates a dedicated GitHub SSH key (+ ~/.ssh/config Host block).
+#   4. Removes the preinstalled Omarchy web apps I never use.
+#   5. Removes native packages I don't want (OBS Studio, Kdenlive, Moonlight).
+#   6. Installs the native apps I always want (repo + AUR), incl. plain vim.
+#   7. Force-installs a few Chromium extensions via enterprise policy.
+#   8. Replaces the screensaver's "OMARCHY" logo with my own ASCII banner.
+#   9. Applies my Hyprland input tweaks (inverse / natural trackpad scrolling).
 #
 # DESIGN
 #   * Idempotent. Safe to run as often as you like; every step checks the
@@ -25,14 +28,25 @@
 # REQUIREMENTS
 #   * bash 4+, and the coreutils Omarchy already ships (sed, grep, mktemp…).
 #   * `omarchy` CLI + `pacman`      — always.
+#   * `git`                         — to clone the setup repo (skipped, warning
+#                                     only, if git isn't installed yet).
 #   * `jq`                          — for the Chromium policy step.
 #   * `yay` or `paru`               — only if AUR_PKGS is non-empty.
 #   * `hyprctl` + a live Hyprland   — only to hot-reload the input step; the
 #                                     file is still written without it.
 #
 # USAGE
-#   omarchy-machine-setup                      # normal run (asks for sudo pw)
-#   SUDO=pkexec omarchy-machine-setup          # when you can't type a sudo pw
+#   Bootstrap a brand-new machine (downloads just this file, which then clones
+#   the full repo and symlinks itself and its sibling scripts into
+#   ~/.local/bin — see SETUP_REPO_* below):
+#     cd ~
+#     curl -fsSLO https://raw.githubusercontent.com/Afterlife7481/Omarchy/main/omarchy-machine-setup
+#     bash omarchy-machine-setup            # or: SUDO=pkexec bash omarchy-machine-setup
+#     rm omarchy-machine-setup              # from here on the PATH copy is the symlink
+#
+#   Every run after that:
+#     omarchy-machine-setup                      # normal run (asks for sudo pw)
+#     SUDO=pkexec omarchy-machine-setup          # when you can't type a sudo pw
 #                                              # (e.g. run from a GUI launcher)
 #
 # CUSTOMISING
@@ -41,6 +55,8 @@
 #
 # REVERTING
 #   directories ..... `rmdir` them (only if empty — nothing here forces it)
+#   repo symlinks ... `rm ~/.local/bin/<name>` for each in SETUP_REPO_BINLINKS
+#                     (the repo itself is untouched)
 #   ssh key ......... `rm ~/.ssh/<name> ~/.ssh/<name>.pub` and delete the
 #                     "omarchy-machine-setup" block from ~/.ssh/config
 #   web apps ........ reinstall from the Omarchy menu (Install → Web App)
@@ -115,6 +131,23 @@ AUR_PKGS=(
 # Nothing is ever deleted here.
 MKDIRS=(
   "$HOME/Gitrepos/Afterlife7481"
+)
+
+# ── Setup repo + symlinks ───────────────────────────────────────────────────
+# This script's own repo is the source of truth for itself and its sibling
+# scripts. Cloned once to SETUP_REPO_DIR if not already there, then each name
+# in SETUP_REPO_BINLINKS is symlinked from the repo into ~/.local/bin.
+#
+# Fetch is anonymous HTTPS so a brand-new machine can clone before any key is
+# on GitHub; the push URL is then rewired to SSH (using SSH_KEY_NAME below) so
+# `git push` works once that key is added to GitHub. Set SETUP_REPO_URL="" to
+# skip this whole step.
+SETUP_REPO_DIR="$HOME/Gitrepos/Afterlife7481/Omarchy"
+SETUP_REPO_URL="https://github.com/Afterlife7481/Omarchy.git"
+SETUP_REPO_PUSH_URL="git@github.com:Afterlife7481/Omarchy.git"
+SETUP_REPO_BINLINKS=(
+  omarchy-machine-setup
+  omarchy-workspace-setup
 )
 
 # ── GitHub SSH key ─────────────────────────────────────────────────────────
@@ -210,6 +243,52 @@ for dir in "${MKDIRS[@]}"; do
     mkdir -p "$dir"
   fi
 done
+
+# ── Setup repo + symlinks ───────────────────────────────────────────────────
+# Clone once (anonymous HTTPS — works before any key is on GitHub), then point
+# `git push` at the SSH remote, then symlink each SETUP_REPO_BINLINKS entry
+# into ~/.local/bin. A regular file at the link's destination is left alone
+# unless it's byte-identical to the repo's copy, so an uncommitted edit is
+# never silently overwritten.
+if [[ -n $SETUP_REPO_URL && -n $SETUP_REPO_DIR ]]; then
+  if ! command -v git &>/dev/null; then
+    warn "git not installed — skipping setup repo + symlinks."
+  else
+    if [[ -d "$SETUP_REPO_DIR/.git" ]]; then
+      log "Setup repo already present: $SETUP_REPO_DIR"
+    else
+      log "Cloning setup repo: $SETUP_REPO_URL"
+      mkdir -p "$(dirname "$SETUP_REPO_DIR")"
+      git clone --quiet "$SETUP_REPO_URL" "$SETUP_REPO_DIR" \
+        || warn "Clone failed — symlinks skipped this run."
+    fi
+
+    if [[ -d "$SETUP_REPO_DIR/.git" ]]; then
+      if [[ -n $SETUP_REPO_PUSH_URL ]] \
+         && [[ "$(git -C "$SETUP_REPO_DIR" remote get-url --push origin 2>/dev/null)" \
+               != "$SETUP_REPO_PUSH_URL" ]]; then
+        log "Setting push remote: $SETUP_REPO_PUSH_URL"
+        git -C "$SETUP_REPO_DIR" remote set-url --push origin "$SETUP_REPO_PUSH_URL"
+      fi
+
+      mkdir -p "$HOME/.local/bin"
+      for name in "${SETUP_REPO_BINLINKS[@]}"; do
+        src="$SETUP_REPO_DIR/$name"
+        dst="$HOME/.local/bin/$name"
+        if [[ ! -e $src ]]; then
+          warn "Not in repo, skipping link: $name"
+        elif [[ -L $dst && "$(readlink -- "$dst")" == "$src" ]]; then
+          log "Already linked: $name"
+        elif [[ -f $dst && ! -L $dst ]] && ! cmp -s "$dst" "$src"; then
+          warn "~/.local/bin/$name differs from the repo copy — left as-is; reconcile and re-run."
+        else
+          log "Linking: ~/.local/bin/$name -> repo"
+          ln -sfn "$src" "$dst"
+        fi
+      done
+    fi
+  fi
+fi
 
 # ── GitHub SSH key ────────────────────────────────────────────────────────
 # Generate ~/.ssh/<name> if absent, then keep the optional Host block in
