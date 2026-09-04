@@ -1,0 +1,400 @@
+#!/bin/bash
+# ==============================================================================
+# omarchy-machine-setup — bring a fresh Omarchy machine to my preferred baseline
+# ==============================================================================
+#
+# WHAT IT DOES
+#   1. Creates the working directories I always want under $HOME.
+#   2. Generates a dedicated GitHub SSH key (+ ~/.ssh/config Host block).
+#   3. Removes the preinstalled Omarchy web apps I never use.
+#   4. Removes native packages I don't want (OBS Studio, Kdenlive, Moonlight).
+#   5. Installs the native apps I always want (repo + AUR), incl. plain vim.
+#   6. Force-installs a few Chromium extensions via enterprise policy.
+#   7. Replaces the screensaver's "OMARCHY" logo with my own ASCII banner.
+#   8. Applies my Hyprland input tweaks (inverse / natural trackpad scrolling).
+#
+# DESIGN
+#   * Idempotent. Safe to run as often as you like; every step checks the
+#     current state first and only acts on the delta.
+#   * Quiet when there's nothing to do. In particular it will NOT prompt for a
+#     password unless there are packages to install or remove, or the Chromium
+#     policy needs to change.
+#   * Fail fast. `set -euo pipefail` means any unexpected error aborts the run
+#     rather than limping on in a half-configured state.
+#
+# REQUIREMENTS
+#   * bash 4+, and the coreutils Omarchy already ships (sed, grep, mktemp…).
+#   * `omarchy` CLI + `pacman`      — always.
+#   * `jq`                          — for the Chromium policy step.
+#   * `yay` or `paru`               — only if AUR_PKGS is non-empty.
+#   * `hyprctl` + a live Hyprland   — only to hot-reload the input step; the
+#                                     file is still written without it.
+#
+# USAGE
+#   omarchy-machine-setup                      # normal run (asks for sudo pw)
+#   SUDO=pkexec omarchy-machine-setup          # when you can't type a sudo pw
+#                                              # (e.g. run from a GUI launcher)
+#
+# CUSTOMISING
+#   Everything you'd want to change lives in the CONFIG block below. To disable
+#   a whole step, empty its list / variable (e.g. `SCREENSAVER_ART=""`).
+#
+# REVERTING
+#   directories ..... `rmdir` them (only if empty — nothing here forces it)
+#   ssh key ......... `rm ~/.ssh/<name> ~/.ssh/<name>.pub` and delete the
+#                     "omarchy-machine-setup" block from ~/.ssh/config
+#   web apps ........ reinstall from the Omarchy menu (Install → Web App)
+#   installed pkgs .. `sudo pacman -Rns <pkg>`
+#   removed pkgs .... `sudo pacman -S <pkg>` (e.g. obs-studio)
+#   chromium ext .... sudo rm /etc/chromium/policies/managed/omarchy-machine-setup.json
+#                     then restart Chromium
+#   screensaver ..... `omarchy branding screensaver reset`
+#   hypr input ...... delete the "omarchy-machine-setup (managed)" block from
+#                     ~/.config/hypr/input.lua (a timestamped .bak is kept)
+# ==============================================================================
+
+set -euo pipefail
+
+# Privilege-escalation command. Overridable so the script also works where a
+# sudo password prompt can't be answered — `SUDO=pkexec omarchy-machine-setup`
+# pops a graphical polkit dialog instead.
+SUDO=${SUDO:-sudo}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONFIG — the only part you should normally edit
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Web apps to remove ────────────────────────────────────────────────────────
+# Omarchy installs each web app as ~/.local/share/applications/<Name>.desktop,
+# where <Name> is exactly the `Name=` shown in the launcher. List those names
+# here; the script calls `omarchy webapp remove` for any that still exist.
+REMOVE_WEBAPPS=(
+  "HEY"
+  "Google Messages"
+  "Google Contacts"
+  "Google Photos"
+  "Basecamp"
+  "Discord"
+)
+
+# ── Native packages from the pacman repos ────────────────────────────────────
+# core / extra / multilib plus the `omarchy` repo. Installed with
+# `pacman -S --needed`, so already-present packages are skipped.
+PACMAN_PKGS=(
+  signal-desktop      # Signal
+  telegram-desktop    # Telegram
+  cursor-bin          # Cursor  (from the omarchy repo)
+  vim                 # plain vim, alongside Omarchy's neovim
+)
+
+# ── Native packages to remove ───────────────────────────────────────────────
+# Removed with `pacman -Rns` (also drops now-orphaned deps and .pacsave files),
+# but only for packages that are actually installed — a missing one is skipped,
+# not an error. List every package in a dependency chain you want gone, since
+# pacman refuses to remove one that another installed package still needs.
+#
+# All of these ship in Omarchy's base package set, so a future `omarchy update`
+# (or `omarchy reinstall pkgs`) can pull them back in; just re-run this script
+# to remove them again. `-Rns` also sweeps up their now-orphaned dependencies
+# (e.g. removing kdenlive drops a large pile of KDE libraries).
+REMOVE_PKGS=(
+  obs-studio
+  kdenlive
+  moonlight-qt        # "Moonlight" game streaming client
+)
+
+# ── Native packages from the AUR ────────────────────────────────────────────
+# Needs an AUR helper (yay or paru). Leave empty to skip the step entirely.
+# Add one package per line, e.g.:  some-app-bin
+AUR_PKGS=(
+)
+
+# ── Directories to ensure exist ────────────────────────────────────────────
+# Plain `mkdir -p` targets under $HOME. Created if missing, left alone if not.
+# Nothing is ever deleted here.
+MKDIRS=(
+  "$HOME/Gitrepos/Afterlife7481"
+)
+
+# ── GitHub SSH key ─────────────────────────────────────────────────────────
+# A dedicated ed25519 key for pushing to GitHub. Created (no passphrase) only
+# if the private key file is missing — an existing key is never touched or
+# overwritten. Set SSH_KEY_NAME="" to skip the whole step.
+#
+# When SSH_GITHUB_HOST is set, a matching `Host` block is kept in ~/.ssh/config
+# (between markers, so re-runs replace rather than duplicate it) binding that
+# host to this key with `IdentitiesOnly yes`. Use "github.com" so ordinary
+#     git clone git@github.com:<owner>/<repo>.git
+# picks up the key (fine when this is the only GitHub identity on the machine);
+# use a distinct alias like "github.com-work" for a second account, and clone
+# via git@github.com-work:<owner>/<repo>.git.
+SSH_KEY_NAME="Afterlife7481"
+SSH_KEY_COMMENT="Afterlife7481"
+SSH_GITHUB_HOST="github.com"
+
+# ── Chromium extensions (force-installed via enterprise policy) ─────────────
+# Values are Chrome Web Store IDs — the 32-char string in the store URL:
+#   https://chromewebstore.google.com/detail/<slug>/<THIS-PART>
+# The generated policy marks each extension:
+#   installation_mode "normal_installed" — installed on next launch; the user
+#     can disable it in chrome://extensions but not fully remove it (it shows
+#     an "Installed by your organization" note).
+#   toolbar_pin "force_pinned"           — icon pinned to the toolbar, the user
+#     can't unpin it.
+# The policy file is system-wide and needs root to write. Chromium must be
+# restarted before it takes effect.
+CHROMIUM_EXTENSIONS=(
+  ghmbeldphafepmbegfdlkpapadhbakde   # Proton Pass
+)
+CHROMIUM_POLICY_FILE=/etc/chromium/policies/managed/omarchy-machine-setup.json
+
+# ── Screensaver banner ─────────────────────────────────────────────────────
+# The Omarchy screensaver (ttfx) renders whatever ASCII/Unicode art lives in
+# the file below; stock content is the "OMARCHY" wordmark. Replace it with your
+# own — box-drawing blocks (█ ▀ ▄) look best. Set SCREENSAVER_ART="" to skip.
+# Undo with: omarchy branding screensaver reset
+# The art below spells "VKS.NET".
+SCREENSAVER_FILE="$HOME/.config/omarchy/branding/screensaver.txt"
+SCREENSAVER_ART=$(cat <<'ART'
+██     ██   ██   ██     ██████      ██   ██   ███████   ███████
+██     ██   ██  ██     ██           ███  ██   ██           ██
+██     ██   ██ ██      ██           ████ ██   ██           ██
+██     ██   ████        █████       ██ ████   ██████       ██
+ ██   ██    ██ ██           ██      ██  ███   ██           ██
+ ██   ██    ██  ██          ██      ██   ██   ██           ██
+  ██ ██     ██   ██    ██   ██  ██  ██   ██   ██           ██
+   ███      ██   ██     █████   ██  ██   ██   ███████      ██
+ART
+)
+
+# ── Hyprland input overrides ───────────────────────────────────────────────
+# Personal `input` settings that Omarchy's defaults don't cover. They're kept
+# in a marker-delimited block at the end of ~/.config/hypr/input.lua so that
+# re-running this script REPLACES the block instead of appending another copy.
+# Each line is an hl.config(...) call; Hyprland merges it over its defaults, so
+# you only need to name the keys you're changing. Set HYPR_INPUT_BLOCK="" to
+# skip the step. Undo by deleting the managed block from input.lua.
+HYPR_INPUT_FILE="$HOME/.config/hypr/input.lua"
+HYPR_MARK_BEGIN="-- >>> omarchy-machine-setup (managed) >>>"
+HYPR_MARK_END="-- <<< omarchy-machine-setup (managed) <<<"
+HYPR_INPUT_BLOCK=$(cat <<'LUA'
+-- Inverse (natural) trackpad scrolling: content follows your fingers, phone-style.
+hl.config({ input = { touchpad = { natural_scroll = true } } })
+LUA
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  IMPLEMENTATION — nothing below here needs per-machine editing
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Coloured status lines. log() = progress on stdout, warn() = problems on stderr.
+log()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
+
+# Sanity check: warn (but keep going) if this clearly isn't an Omarchy box, so a
+# mistaken run on another machine is obvious in the output.
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} && ! -d /usr/share/omarchy ]]; then
+  warn "This doesn't look like an Omarchy machine — continuing anyway."
+fi
+
+# ── Create directories ─────────────────────────────────────────────────────
+# `mkdir -p` is already idempotent; the -d test is only so the log line
+# reflects whether anything was actually created.
+for dir in "${MKDIRS[@]}"; do
+  if [[ -d "$dir" ]]; then
+    log "Directory already exists: $dir"
+  else
+    log "Creating directory: $dir"
+    mkdir -p "$dir"
+  fi
+done
+
+# ── GitHub SSH key ────────────────────────────────────────────────────────
+# Generate ~/.ssh/<name> if absent, then keep the optional Host block in
+# ~/.ssh/config current. On first creation, print the public key so it can be
+# pasted into GitHub → Settings → SSH and GPG keys.
+if [[ -n $SSH_KEY_NAME ]]; then
+  ssh_key="$HOME/.ssh/$SSH_KEY_NAME"
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+
+  if [[ -f $ssh_key ]]; then
+    log "SSH key already exists: $ssh_key"
+  else
+    log "Creating SSH key: $ssh_key"
+    ssh-keygen -t ed25519 -f "$ssh_key" -N "" -C "$SSH_KEY_COMMENT" -q
+    warn "Add this public key to GitHub (Settings → SSH and GPG keys):"
+    printf '\n%s\n\n' "$(cat "$ssh_key.pub")"
+  fi
+
+  # Optional ~/.ssh/config Host block, maintained between markers. The markers
+  # are keyed to the key name (not the host) so re-runs find and replace the
+  # block even if SSH_GITHUB_HOST later changes.
+  if [[ -n $SSH_GITHUB_HOST ]]; then
+    ssh_config="$HOME/.ssh/config"
+    ssh_begin="# >>> omarchy-machine-setup ($SSH_KEY_NAME) >>>"
+    ssh_end="# <<< omarchy-machine-setup ($SSH_KEY_NAME) <<<"
+    ssh_block="$ssh_begin
+Host $SSH_GITHUB_HOST
+    HostName github.com
+    User git
+    IdentityFile $ssh_key
+    IdentitiesOnly yes
+$ssh_end"
+
+    [[ -f $ssh_config ]] || install -m600 /dev/null "$ssh_config"
+    current=$(sed -n "\|^$ssh_begin\$|,\|^$ssh_end\$|p" "$ssh_config")
+    if [[ "$current" == "$ssh_block" ]]; then
+      log "SSH config already current for host: $SSH_GITHUB_HOST"
+    else
+      log "Writing SSH config for host: $SSH_GITHUB_HOST"
+      stripped=$(sed "\|^$ssh_begin\$|,\|^$ssh_end\$|d" "$ssh_config")
+      if [[ -n $stripped ]]; then
+        printf '%s\n\n%s\n' "$stripped" "$ssh_block" >"$ssh_config"
+      else
+        printf '%s\n' "$ssh_block" >"$ssh_config"
+      fi
+      chmod 600 "$ssh_config"
+    fi
+  fi
+fi
+
+# ── Remove web apps ─────────────────────────────────────────────────────────
+# `omarchy webapp remove` deletes the .desktop file and its cached icon.
+# OMARCHY_REMOVE_NOTIFY=false suppresses the desktop notification it would
+# otherwise pop for each removal.
+APPS_DIR="$HOME/.local/share/applications"
+for app in "${REMOVE_WEBAPPS[@]}"; do
+  if [[ -f "$APPS_DIR/$app.desktop" ]]; then
+    log "Removing web app: $app"
+    OMARCHY_REMOVE_NOTIFY=false omarchy webapp remove "$app"
+  else
+    log "Web app already gone: $app"
+  fi
+done
+
+# ── Remove pacman packages ────────────────────────────────────────────────
+# Narrow REMOVE_PKGS to the ones actually installed, then remove them in one
+# `pacman -Rns` transaction. Skipped (no sudo prompt) when there's nothing to
+# remove.
+if ((${#REMOVE_PKGS[@]})); then
+  present_remove=()
+  for p in "${REMOVE_PKGS[@]}"; do
+    pacman -Q "$p" &>/dev/null && present_remove+=("$p")
+  done
+  if ((${#present_remove[@]})); then
+    log "Removing packages: ${present_remove[*]}"
+    "$SUDO" pacman -Rns --noconfirm "${present_remove[@]}"
+  else
+    log "Packages already removed: ${REMOVE_PKGS[*]}"
+  fi
+fi
+
+# ── Install pacman packages ────────────────────────────────────────────────
+# Build the list of packages that aren't installed yet, then do a single
+# `pacman -S` for the lot. If nothing is missing we never invoke sudo.
+missing_pacman=()
+for p in "${PACMAN_PKGS[@]}"; do
+  pacman -Q "$p" &>/dev/null || missing_pacman+=("$p")
+done
+if ((${#missing_pacman[@]})); then
+  log "Installing repo packages: ${missing_pacman[*]}"
+  "$SUDO" pacman -S --needed --noconfirm "${missing_pacman[@]}"
+else
+  log "Repo packages already installed: ${PACMAN_PKGS[*]}"
+fi
+
+# ── Install AUR packages ────────────────────────────────────────────────────
+# Same missing-first approach. Prefer yay, fall back to paru; if neither is
+# installed we warn and move on rather than failing the whole run.
+if ((${#AUR_PKGS[@]})); then
+  missing_aur=()
+  for p in "${AUR_PKGS[@]}"; do
+    pacman -Q "$p" &>/dev/null || missing_aur+=("$p")
+  done
+  if ((${#missing_aur[@]} == 0)); then
+    log "AUR packages already installed: ${AUR_PKGS[*]}"
+  elif command -v yay &>/dev/null; then
+    log "Installing AUR packages: ${missing_aur[*]}"
+    yay -S --needed --noconfirm --answerdiff=None --answeredit=None "${missing_aur[@]}"
+  elif command -v paru &>/dev/null; then
+    log "Installing AUR packages: ${missing_aur[*]}"
+    paru -S --needed --noconfirm --skipreview "${missing_aur[@]}"
+  else
+    warn "No AUR helper (yay/paru) found — skipping: ${missing_aur[*]}"
+  fi
+fi
+
+# ── Chromium extensions (enterprise policy) ────────────────────────────────
+# Render the desired policy JSON from CHROMIUM_EXTENSIONS, compare it (order-
+# independent, via `jq -S`) with what's already on disk, and only rewrite when
+# they differ.
+if ((${#CHROMIUM_EXTENSIONS[@]})); then
+  want=$(printf '%s\n' "${CHROMIUM_EXTENSIONS[@]}" | jq -R . | jq -s '
+    { ExtensionSettings: (
+        map({ (.): {
+          installation_mode: "normal_installed",
+          update_url: "https://clients2.google.com/service/update2/crx",
+          toolbar_pin: "force_pinned"
+        } }) | add
+    ) }')
+
+  if [[ -f $CHROMIUM_POLICY_FILE ]] \
+     && diff -q <(jq -S . "$CHROMIUM_POLICY_FILE" 2>/dev/null) <(jq -S . <<<"$want") &>/dev/null; then
+    log "Chromium extension policy already current: ${CHROMIUM_EXTENSIONS[*]}"
+  else
+    log "Writing Chromium extension policy: ${CHROMIUM_EXTENSIONS[*]}"
+    tmp=$(mktemp)
+    printf '%s\n' "$want" >"$tmp"
+    "$SUDO" install -Dm644 "$tmp" "$CHROMIUM_POLICY_FILE"   # -D makes parent dirs
+    rm -f "$tmp"
+    warn "Restart Chromium for the extension(s) to install."
+  fi
+fi
+
+# ── Screensaver branding ───────────────────────────────────────────────────
+# Write SCREENSAVER_ART to the branding file when it differs. The `//[$' \t\n']/`
+# expansion strips all whitespace just to test "is the art effectively empty?"
+# — that's the opt-out check, not the content that gets written.
+if [[ -n ${SCREENSAVER_ART//[$' \t\n']/} ]]; then
+  if [[ -f "$SCREENSAVER_FILE" && "$(cat "$SCREENSAVER_FILE")" == "$SCREENSAVER_ART" ]]; then
+    log "Screensaver banner already set."
+  else
+    log "Setting screensaver banner."
+    mkdir -p "$(dirname "$SCREENSAVER_FILE")"
+    printf '%s\n' "$SCREENSAVER_ART" >"$SCREENSAVER_FILE"
+    # omarchy-screensaver re-reads the file on every redraw loop; killing ttfx
+    # makes a currently-running screensaver pick up the new banner within ~1s
+    # instead of waiting for the next idle timeout. No-op if it isn't running.
+    pkill -x ttfx 2>/dev/null || true
+  fi
+fi
+
+# ── Hyprland input overrides ───────────────────────────────────────────────
+# Maintain the marker-delimited block at the end of input.lua:
+#   * read back whatever is currently between the markers (sed range print)
+#   * if it already matches, do nothing
+#   * otherwise back the file up, delete any old block, and append the new one
+# `\|...\|` is sed's custom-delimiter address form — used here so the markers'
+# own characters don't need escaping. A live Hyprland is reloaded and checked
+# for config errors; without one, the file is still written for next login.
+if [[ -n ${HYPR_INPUT_BLOCK//[$' \t\n']/} && -f "$HYPR_INPUT_FILE" ]]; then
+  desired="$HYPR_MARK_BEGIN"$'\n'"$HYPR_INPUT_BLOCK"$'\n'"$HYPR_MARK_END"
+  current=$(sed -n "\|^$HYPR_MARK_BEGIN\$|,\|^$HYPR_MARK_END\$|p" "$HYPR_INPUT_FILE")
+  if [[ "$current" == "$desired" ]]; then
+    log "Hyprland input overrides already applied."
+  else
+    log "Applying Hyprland input overrides."
+    cp "$HYPR_INPUT_FILE" "$HYPR_INPUT_FILE.bak.$(date +%s)"
+    stripped=$(sed "\|^$HYPR_MARK_BEGIN\$|,\|^$HYPR_MARK_END\$|d" "$HYPR_INPUT_FILE")
+    printf '%s\n\n%s\n' "${stripped%$'\n'}" "$desired" >"$HYPR_INPUT_FILE"
+    if command -v hyprctl &>/dev/null && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+      hyprctl reload &>/dev/null || true
+      errors=$(hyprctl configerrors 2>/dev/null | grep -i error || true)
+      [[ -n $errors ]] && warn "hyprctl reported config errors:"$'\n'"$errors"
+    fi
+  fi
+fi
+
+log "Machine setup complete."

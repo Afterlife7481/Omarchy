@@ -1,0 +1,51 @@
+#!/bin/bash
+# omarchy-workspace-setup — lay out apps across workspaces the way I like them.
+#
+#   ws 1  browser (chromium)
+#   ws 2  Telegram + Signal
+#   ws 3  Cursor
+#   ws 4  two terminals (foot)
+#
+# Usage: omarchy-workspace-setup
+#
+# Windows open with `[workspace N silent]` so the focused workspace does not
+# jump around while things start; we switch to workspace 1 at the end.
+#
+# Note: this only *adds* windows. Run it on a fresh Hyprland session, or close
+# what you have open first, otherwise apps pile on top of existing windows.
+
+set -euo pipefail
+
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  echo "omarchy-workspace-setup: not inside a Hyprland session" >&2
+  exit 1
+fi
+
+# Launch CMD... on workspace WS. uwsm-app keeps each app in its own systemd
+# scope, matching how Omarchy starts GUI programs. hl.dsp.exec_cmd is the
+# Lua-config dispatch entrypoint used by Omarchy's Hyprland (0.56+); the old
+# `hyprctl dispatch exec "[rules] cmd"` string form no longer parses.
+spawn() {
+  local ws=$1
+  shift
+  hyprctl dispatch "hl.dsp.exec_cmd(\"[workspace $ws silent] uwsm-app -- $*\")" >/dev/null
+}
+
+# ── Workspace 1 : browser ───────────────────────────────────────────────
+spawn 1 chromium
+
+# ── Workspace 2 : chat ─────────────────────────────────────────────────
+spawn 2 Telegram
+spawn 2 signal-desktop
+
+# ── Workspace 3 : editor ───────────────────────────────────────────────
+spawn 3 cursor
+
+# ── Workspace 4 : two terminals ────────────────────────────────────────
+spawn 4 foot
+spawn 4 foot
+
+# ── Land on workspace 1 ────────────────────────────────────────────────
+hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
+
+echo "Workspaces laid out. Give the apps a few seconds to finish opening."
