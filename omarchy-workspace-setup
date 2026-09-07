@@ -11,6 +11,8 @@
 #
 # Windows open with `[workspace N silent]` so the focused workspace does not
 # jump around while things start; we switch to workspace 1 at the end.
+# Exception: Proton Mail (ws 5) is a chromium --app window that ignores that
+# prefix, so it's placed by briefly focusing ws 5 while it opens — see below.
 #
 # Note: this only *adds* windows. Run it on a fresh Hyprland session, or close
 # what you have open first, otherwise apps pile on top of existing windows.
@@ -47,12 +49,21 @@ spawn 4 foot
 spawn 4 foot
 
 # ── Workspace 5 : email ────────────────────────────────────────────────
-# The "Proton Mail" web app. Just launch it here — a chromium --app window is
-# spawned by the already-running browser process, so [workspace 5 silent] on
-# this line wouldn't stick; the class-matched window rule installed by
-# omarchy-machine-setup ("chrome-mail.proton.me" -> workspace 5) places it.
+# The "Proton Mail" web app. Its window is a chromium --app window opened by
+# the already-running browser process, which ignores a [workspace N silent]
+# prefix on the launch command — such a window just lands on whichever
+# workspace is focused when it maps. So: focus ws 5, launch, and hold focus
+# there until the window appears (or a ~20s timeout); the "land on workspace 1"
+# step below then takes us back. There is deliberately no persistent window
+# rule for this, so launching Proton Mail from the app launcher still opens it
+# on the current workspace.
+hyprctl dispatch 'hl.dsp.focus({ workspace = "5" })' >/dev/null
 hyprctl dispatch \
   "hl.dsp.exec_cmd(\"omarchy-launch-webapp https://mail.proton.me/u/0/inbox\")" >/dev/null
+for _ in $(seq 1 40); do
+  sleep 0.5
+  if hyprctl clients | grep -q 'class: chrome-mail\.proton\.me'; then break; fi
+done
 
 # ── Land on workspace 1 ────────────────────────────────────────────────
 hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
