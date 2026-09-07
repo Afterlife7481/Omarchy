@@ -9,17 +9,16 @@
 #
 # Usage: omarchy-workspace-setup
 #
-# Most apps open with `[workspace N silent]` so the focused workspace doesn't
-# jump around while things start. Two don't cooperate with that prefix in this
-# Hyprland — a `chromium --app` window (Proton Mail) comes from the shared
-# chromium process, and Signal (Electron) maps too slowly — so both land on
-# whatever workspace is *focused* when their window appears. They're handled
-# first, in isolation: focus the target, launch, wait for the window, return to
-# ws 1 — all before the `[workspace N silent]` apps start, so this brief focus
-# movement can't pull those off target.
+# This Hyprland does not reliably honour a `[workspace N silent]` prefix on the
+# launch command — apps end up on whatever workspace is *focused* when their
+# window maps. So the script works one workspace at a time: focus it, launch
+# its app(s), wait for each window to actually appear, then move to the next.
+# Slower (~20-30s) but deterministic. Ends on workspace 1.
 #
-# Note: this only *adds* windows. Run it on a fresh Hyprland session, or close
-# what you have open first, otherwise apps pile on top of existing windows.
+# Note: this only *adds* windows, and it waits per app for a NEW window — so
+# run it on a fresh Hyprland session. Re-running with an app already open (the
+# single-instance ones, Telegram/Signal, especially) just makes that step wait
+# out its timeout.
 
 set -euo pipefail
 
@@ -28,15 +27,17 @@ if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
   exit 1
 fi
 
-# Windows whose class matches RE (case-insensitive), currently open.
+# Number of open windows whose class matches RE (case-insensitive).
 count() {
   hyprctl -j clients 2>/dev/null \
     | jq --arg re "$1" '[.[] | select(.class | test($re; "i"))] | length' 2>/dev/null \
     || echo 0
 }
 
-# Focus WS, launch CMD... through uwsm-app, wait (~20s max) for a new window of
-# class RE to appear so it lands on WS rather than wherever focus goes next.
+# place WS CLASS_RE CMD...
+# Focus WS, launch CMD... through uwsm-app, then wait (~20s max) for one more
+# window of class CLASS_RE to exist — so it lands on WS and the next call
+# starts from a settled state.
 place() {
   local ws=$1 re=$2 before i
   shift 2
@@ -49,35 +50,15 @@ place() {
   done
 }
 
-# Launch CMD... on workspace WS via the [workspace N silent] prefix. Works for
-# native apps and single-process ones that map promptly (chromium, Telegram,
-# Cursor, foot). hl.dsp.exec_cmd is Omarchy Hyprland's lua dispatch entrypoint;
-# the old `hyprctl dispatch exec "[rules] cmd"` string form no longer parses.
-spawn() {
-  local ws=$1
-  shift
-  hyprctl dispatch "hl.dsp.exec_cmd(\"[workspace $ws silent] uwsm-app -- $*\")" >/dev/null
-}
-
-# ── Placed first, in isolation (see header) ────────────────────────────
-place 5 'mail\.proton\.me' omarchy-launch-webapp https://mail.proton.me/u/0/inbox
-place 2 'signal'           signal-desktop
-hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
-
-# ── Workspace 1 : browser ───────────────────────────────────────────────
-spawn 1 chromium
-
-# ── Workspace 2 : chat (Telegram; Signal already placed above) ─────────
-spawn 2 Telegram
-
-# ── Workspace 3 : editor ───────────────────────────────────────────────
-spawn 3 cursor
-
-# ── Workspace 4 : two terminals ────────────────────────────────────────
-spawn 4 foot
-spawn 4 foot
+place 1 'chromium'          chromium
+place 2 'telegram'          Telegram
+place 2 'signal'            signal-desktop
+place 3 'cursor'            cursor
+place 4 'foot'              foot
+place 4 'foot'              foot
+place 5 'mail\.proton\.me'  omarchy-launch-webapp https://mail.proton.me/u/0/inbox
 
 # ── Land on workspace 1 ────────────────────────────────────────────────
 hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
 
-echo "Workspaces laid out. Give the apps a few seconds to finish opening."
+echo "Workspaces laid out."
