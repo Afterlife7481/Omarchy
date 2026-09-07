@@ -9,7 +9,7 @@
 #      ~/.local/bin, so a downloaded bootstrap copy hands off to a git-tracked
 #      working tree on the very first run.
 #   3. Generates a dedicated GitHub SSH key (+ ~/.ssh/config Host block).
-#   4. Removes the preinstalled Omarchy web apps I never use.
+#   4. Removes the preinstalled web apps I never use; installs the ones I do.
 #   5. Removes native packages I don't want (OBS Studio, Kdenlive, Moonlight).
 #   6. Installs the native apps I always want (repo + AUR), incl. plain vim.
 #   7. Force-installs a few Chromium extensions via enterprise policy.
@@ -120,6 +120,16 @@ REMOVE_WEBAPPS=(
   "Google Photos"
   "Basecamp"
   "Discord"
+)
+
+# ── Web apps to install ─────────────────────────────────────────────────────
+# Omarchy web-app launchers to create, one "Name|URL" per line (optionally
+# "Name|URL|Icon", where Icon is a PNG URL, a local file path, or a bundled
+# icon name; omit it to auto-fetch the site's favicon). A launcher is created
+# only if one of that Name doesn't already exist, so re-runs are quiet and
+# don't re-download icons. Remove one by moving its Name to REMOVE_WEBAPPS.
+INSTALL_WEBAPPS=(
+  "Proton Mail|https://mail.proton.me/u/0/inbox"
 )
 
 # ── Native packages from the pacman repos ────────────────────────────────────
@@ -378,6 +388,26 @@ for app in "${REMOVE_WEBAPPS[@]}"; do
     OMARCHY_REMOVE_NOTIFY=false omarchy webapp remove "$app"
   else
     log "Web app already gone: $app"
+  fi
+done
+
+# ── Install web apps ───────────────────────────────────────────────────────
+# `omarchy webapp install <name> <url> <icon>` is non-interactive with 3+ args
+# and an empty icon arg auto-fetches the site favicon. It rewrites the .desktop
+# every call, so skip when the launcher already exists. A failure (usually no
+# network for the icon) warns rather than aborting the whole run.
+for entry in "${INSTALL_WEBAPPS[@]}"; do
+  name=${entry%%|*}
+  rest=${entry#*|}
+  url=${rest%%|*}
+  icon=""
+  [[ $rest == *"|"* ]] && icon=${rest#*|}
+  if [[ -f "$APPS_DIR/$name.desktop" ]]; then
+    log "Web app already installed: $name"
+  else
+    log "Installing web app: $name"
+    omarchy webapp install "$name" "$url" "$icon" \
+      || warn "Failed to install web app: $name"
   fi
 done
 
