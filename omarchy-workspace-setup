@@ -9,10 +9,13 @@
 #
 # Usage: omarchy-workspace-setup
 #
-# Windows open with `[workspace N silent]` so the focused workspace does not
-# jump around while things start; we switch to workspace 1 at the end. The
-# script never moves focus itself while apps are opening — doing so makes
-# slow-to-map apps (Electron ones especially) land on the wrong workspace.
+# ws 1-4 open with `[workspace N silent]` so the focused workspace doesn't jump
+# around while things start. ws 5 is different: Proton Mail is a `chromium
+# --app` window opened by the shared chromium process, and that prefix never
+# attaches to it — such a window just lands on whichever workspace is focused
+# when it maps. So Proton is done FIRST, in isolation: focus ws 5, launch, wait
+# for its window, return to ws 1 — all before any other app is launched, so the
+# brief focus change can't pull the [workspace N silent] apps off target.
 #
 # Note: this only *adds* windows. Run it on a fresh Hyprland session, or close
 # what you have open first, otherwise apps pile on top of existing windows.
@@ -34,12 +37,15 @@ spawn() {
   hyprctl dispatch "hl.dsp.exec_cmd(\"[workspace $ws silent] uwsm-app -- $*\")" >/dev/null
 }
 
-# ── Workspace 5 : email ────────────────────────────────────────────────
-# Proton Mail as a chromium --app window. Launched FIRST, on purpose: a
-# `chromium --app` invocation while chromium is already running just hands the
-# window to the existing process, and `[workspace 5 silent]` never attaches to
-# it. Going first, this is the process that starts chromium, so the rule sticks.
-spawn 5 chromium --app="https://mail.proton.me/u/0/inbox"
+# ── Workspace 5 : email (must go first — see header) ───────────────────
+hyprctl dispatch 'hl.dsp.focus({ workspace = "5" })' >/dev/null
+hyprctl dispatch \
+  "hl.dsp.exec_cmd(\"omarchy-launch-webapp https://mail.proton.me/u/0/inbox\")" >/dev/null
+for _ in $(seq 1 30); do          # wait up to ~15s for its window to map
+  sleep 0.5
+  if hyprctl clients | grep -q 'class: chrome-mail\.proton\.me'; then break; fi
+done
+hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
 
 # ── Workspace 1 : browser ───────────────────────────────────────────────
 spawn 1 chromium
