@@ -19,6 +19,75 @@
 # run it on a fresh Hyprland session. Re-running with an app already open (the
 # single-instance ones, Telegram/Signal, especially) just makes that step wait
 # out its timeout.
+#
+# ============================================================================
+# EDITING THIS FILE — hard-won notes, please read before changing the layout
+# ============================================================================
+#
+# TO ADD / MOVE AN APP: add one line
+#     place <ws> '<class-regex>' <command> [args...]
+#   - <class-regex> is matched case-insensitively against the Hyprland window
+#     `class` (jq `test()` regex — remember to backslash-escape dots).
+#   - Find an app's class by launching it once and running:
+#         hyprctl clients | grep -E 'class|title'
+#     or  hyprctl -j clients | jq '.[] | {class, ws: .workspace.id}'
+#   - For a web app the command is `omarchy-launch-webapp <url>` and the class
+#     is chromium-derived from the URL, e.g. https://mail.proton.me/u/0/inbox
+#     -> class "chrome-mail.proton.me__u_0_inbox-Default" (regex 'mail\.proton\.me').
+#   - Multiple apps on one workspace: just call `place` once per app (see ws 2
+#     and ws 4). `count` is relative (before vs after), so it's fine that the
+#     terminal running this script is itself a `foot` window.
+#
+# WHY IT'S BUILT THIS WAY (do not "simplify" back into these):
+#   1. `[workspace N silent]` on the launch command — via
+#      hl.dsp.exec_cmd("[workspace N silent] ...") or `hyprctl dispatch exec` —
+#      is NOT reliable in this Omarchy Hyprland. Every app tested (chromium
+#      --app, Signal, Telegram, Cursor) ignored it and opened on the *focused*
+#      workspace. That is the whole reason `place` focuses first and waits.
+#   2. The classic string dispatchers are dead here and fail SILENTLY (no
+#      error, no effect): `hyprctl dispatch movetoworkspacesilent "N,address:X"`,
+#      `... focuswindow address:X`, `... closewindow address:X`. This Hyprland
+#      takes a lua API only — see the reference below. So "launch anywhere then
+#      move the window to ws N" does not work; placement must happen via focus
+#      before the window maps.
+#   3. All Omarchy web apps are `chromium --app=URL` windows sharing ONE
+#      chromium process. The first chromium-anything invocation starts it; every
+#      later one hands its window to that process and exits, so an exec-time
+#      workspace rule has no child window to attach to. `--class` is also
+#      ignored when `--app` is used, so you can't give it a distinct class.
+#   4. Electron apps (Signal, Cursor) take 5-12s to map; `place`'s ~20s wait
+#      covers that. Do not shorten the loop below ~15s.
+#   5. `place` waits for a *new* window, so single-instance apps that are
+#      already running (Telegram, Signal) make it wait the full timeout. Keep
+#      the "fresh session" note above accurate if you add such an app.
+#
+# ALTERNATIVE (deliberately NOT used): a persistent rule
+#     o.window("<class>", { workspace = "N" })
+#   in ~/.config/hypr/*.lua + `hyprctl reload` DOES place windows reliably, by
+#   class, at map time. We don't use it because it would force the app onto
+#   ws N even when launched from the app launcher; this script is meant to be
+#   the only thing that imposes the layout.
+#
+# THIS HYPRLAND'S DISPATCH API (lua only; `hyprctl dispatch "<lua>"`):
+#     hl.dsp.exec_cmd("uwsm-app -- <cmd>")        launch a program
+#     hl.dsp.focus({ workspace = "N" })           switch to workspace N
+#     hl.dsp.window.move({ workspace="N", follow=false })   move ACTIVE window
+#     hl.dsp.window.close()                        close the ACTIVE window
+#   There is no reliable "act on window X by address" form exposed here — hence
+#   the focus-then-launch approach.
+#
+# KNOWN WINDOW CLASSES:
+#     chromium               chromium
+#     Telegram               org.telegram.desktop
+#     Signal                 signal
+#     Cursor                 cursor
+#     foot                   foot
+#     Proton Mail web app    chrome-mail.proton.me__u_0_inbox-Default
+#
+# VERIFYING A CHANGE: run the single `place` line (or the whole script) on a
+# fresh session, then check placement with
+#     hyprctl -j clients | jq -c '[.[] | {class, ws: .workspace.id}]'
+# ============================================================================
 
 set -euo pipefail
 
