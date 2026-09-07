@@ -14,7 +14,8 @@
 #   6. Installs the native apps I always want (repo + AUR), incl. plain vim.
 #   7. Force-installs a few Chromium extensions via enterprise policy.
 #   8. Replaces the screensaver's "OMARCHY" logo with my own ASCII banner.
-#   9. Applies my Hyprland input tweaks (inverse / natural trackpad scrolling).
+#   9. Applies my Hyprland overrides (natural trackpad scroll; Proton Mail
+#      pinned to workspace 5).
 #
 # DESIGN
 #   * Idempotent. Safe to run as often as you like; every step checks the
@@ -239,19 +240,26 @@ SCREENSAVER_ART=$(cat <<'ART'
 ART
 )
 
-# ── Hyprland input overrides ───────────────────────────────────────────────
-# Personal `input` settings that Omarchy's defaults don't cover. They're kept
-# in a marker-delimited block at the end of ~/.config/hypr/input.lua so that
+# ── Hyprland overrides (input + window rules) ──────────────────────────────
+# Personal Hyprland tweaks that Omarchy's defaults don't cover, kept in a
+# marker-delimited block at the end of ~/.config/hypr/input.lua so that
 # re-running this script REPLACES the block instead of appending another copy.
-# Each line is an hl.config(...) call; Hyprland merges it over its defaults, so
-# you only need to name the keys you're changing. Set HYPR_INPUT_BLOCK="" to
-# skip the step. Undo by deleting the managed block from input.lua.
+# (input.lua just happens to be the anchor file — Omarchy loads every ~/.config/
+# hypr/*.lua, so hl.config(), o.window() etc. are all valid here.) Set
+# HYPR_INPUT_BLOCK="" to skip the step; undo by deleting the managed block.
 HYPR_INPUT_FILE="$HOME/.config/hypr/input.lua"
 HYPR_MARK_BEGIN="-- >>> omarchy-machine-setup (managed) >>>"
 HYPR_MARK_END="-- <<< omarchy-machine-setup (managed) <<<"
 HYPR_INPUT_BLOCK=$(cat <<'LUA'
 -- Inverse (natural) trackpad scrolling: content follows your fingers, phone-style.
 hl.config({ input = { touchpad = { natural_scroll = true } } })
+
+-- Pin the Proton Mail web app to workspace 5. A chromium --app window is
+-- created by the already-running browser process, so a [workspace] rule on the
+-- launch command doesn't stick to it — a class-matched window rule does. The
+-- bare string is auto-anchored (^(...)$), hence the trailing .* — the real
+-- class is chrome-mail.proton.me__u_0_inbox-Default.
+o.window("chrome-mail\\.proton\\.me.*", { workspace = "5 silent" })
 LUA
 )
 
@@ -508,7 +516,7 @@ if [[ -n ${SCREENSAVER_ART//[$' \t\n']/} ]]; then
   fi
 fi
 
-# ── Hyprland input overrides ───────────────────────────────────────────────
+# ── Hyprland overrides ────────────────────────────────────────────────────
 # Maintain the marker-delimited block at the end of input.lua:
 #   * read back whatever is currently between the markers (sed range print)
 #   * if it already matches, do nothing
@@ -520,9 +528,9 @@ if [[ -n ${HYPR_INPUT_BLOCK//[$' \t\n']/} && -f "$HYPR_INPUT_FILE" ]]; then
   desired="$HYPR_MARK_BEGIN"$'\n'"$HYPR_INPUT_BLOCK"$'\n'"$HYPR_MARK_END"
   current=$(sed -n "\|^$HYPR_MARK_BEGIN\$|,\|^$HYPR_MARK_END\$|p" "$HYPR_INPUT_FILE")
   if [[ "$current" == "$desired" ]]; then
-    log "Hyprland input overrides already applied."
+    log "Hyprland overrides already applied."
   else
-    log "Applying Hyprland input overrides."
+    log "Applying Hyprland overrides."
     cp "$HYPR_INPUT_FILE" "$HYPR_INPUT_FILE.bak.$(date +%s)"
     stripped=$(sed "\|^$HYPR_MARK_BEGIN\$|,\|^$HYPR_MARK_END\$|d" "$HYPR_INPUT_FILE")
     printf '%s\n\n%s\n' "${stripped%$'\n'}" "$desired" >"$HYPR_INPUT_FILE"

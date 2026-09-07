@@ -5,6 +5,7 @@
 #   ws 2  Telegram + Signal
 #   ws 3  Cursor
 #   ws 4  two terminals (foot)
+#   ws 5  Proton Mail (web app)
 #
 # Usage: omarchy-workspace-setup
 #
@@ -44,6 +45,14 @@ spawn 3 cursor
 # ── Workspace 4 : two terminals ────────────────────────────────────────
 spawn 4 foot
 spawn 4 foot
+
+# ── Workspace 5 : email ────────────────────────────────────────────────
+# The "Proton Mail" web app. Just launch it here — a chromium --app window is
+# spawned by the already-running browser process, so [workspace 5 silent] on
+# this line wouldn't stick; the class-matched window rule installed by
+# omarchy-machine-setup ("chrome-mail.proton.me" -> workspace 5) places it.
+hyprctl dispatch \
+  "hl.dsp.exec_cmd(\"omarchy-launch-webapp https://mail.proton.me/u/0/inbox\")" >/dev/null
 
 # ── Land on workspace 1 ────────────────────────────────────────────────
 hyprctl dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null
