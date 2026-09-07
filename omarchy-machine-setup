@@ -35,19 +35,47 @@
 #   * `hyprctl` + a live Hyprland   — only to hot-reload the input step; the
 #                                     file is still written without it.
 #
-# USAGE
-#   Bootstrap a brand-new machine (downloads just this file, which then clones
-#   the full repo and symlinks itself and its sibling scripts into
-#   ~/.local/bin — see SETUP_REPO_* below):
-#     cd ~
-#     curl -fsSLO https://raw.githubusercontent.com/Afterlife7481/Omarchy/main/omarchy-machine-setup
-#     bash omarchy-machine-setup            # or: SUDO=pkexec bash omarchy-machine-setup
-#     rm omarchy-machine-setup              # from here on the PATH copy is the symlink
+# NEW MACHINE — RUNBOOK
+#   Follow these in order on a fresh Omarchy install. Steps 1-6 are the whole
+#   bootstrap; 7-9 are the manual bits this script can't do for you.
 #
-#   Every run after that:
-#     omarchy-machine-setup                      # normal run (asks for sudo pw)
-#     SUDO=pkexec omarchy-machine-setup          # when you can't type a sudo pw
-#                                              # (e.g. run from a GUI launcher)
+#   1. Boot into Omarchy, connect to the network, finish the first-run wizard.
+#
+#   2. Make sure git is installed (Omarchy ships it; if missing):
+#        sudo pacman -Sy --needed git
+#
+#   3. Download just this file (throwaway bootstrap copy):
+#        cd ~
+#        curl -fsSLO https://raw.githubusercontent.com/Afterlife7481/Omarchy/main/omarchy-machine-setup
+#
+#   4. First run — enter your sudo password when it reaches the package steps:
+#        bash omarchy-machine-setup            # or: SUDO=pkexec bash omarchy-machine-setup
+#      This clones the repo to ~/Gitrepos/Afterlife7481/Omarchy, symlinks the
+#      scripts into ~/.local/bin, creates the SSH key, and PRINTS ITS PUBLIC KEY.
+#
+#   5. Add that public key to GitHub -> Settings -> SSH and GPG keys -> New SSH key.
+#      (See it again any time with:  cat ~/.ssh/Afterlife7481.pub)
+#
+#   6. Delete the bootstrap copy — from now on the command on PATH is the
+#      symlink into the repo:
+#        rm ~/omarchy-machine-setup
+#
+#   7. Verify push access, then run once more (idempotent — completes anything
+#      the first pass skipped):
+#        ssh -T git@github.com                 # expect: "Hi Afterlife7481!"
+#        omarchy-machine-setup
+#
+#   8. Restart Chromium so the forced extensions install; log out/in (or
+#      reboot) so removed packages/web apps clear and Hyprland reloads clean.
+#
+#   9. Per Hyprland session, when you want the workspace layout (only ever
+#      ADDS windows — run it on a fresh session):
+#        omarchy-workspace-setup
+#
+# USAGE (every run after the first)
+#   omarchy-machine-setup                        # normal run (asks for sudo pw)
+#   SUDO=pkexec omarchy-machine-setup            # when you can't type a sudo pw
+#                                                # (e.g. run from a GUI launcher)
 #
 # CUSTOMISING
 #   Everything you'd want to change lives in the CONFIG block below. To disable
